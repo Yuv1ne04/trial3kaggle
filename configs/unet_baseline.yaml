@@ -33,7 +33,11 @@ data:
   persistent_workers: true
   prefetch_factor: 2
   drop_last: true
-  max_samples: 0                  # 0 = use all; sanity mode sets this itself
+  # Full train split (~415k) x heavy reference model => ~10 h/epoch on a T4.
+  # Cap the epoch to a large-but-practical subset so Kaggle sessions are usable
+  # (30000 / ~11 samples/s ~= 45 min/epoch). Raise/lower to trade time vs data;
+  # set 0 to use everything. Augmentation + curriculum still give variety.
+  max_samples: 30000
 
 # ---- Optimisation ---------------------------------------------------------
 optimizer:
@@ -60,7 +64,7 @@ metrics: [psnr, ssim, sam, rmse, mae, ergas]   # cloud/clear variants auto-added
 
 # ---- Trainer --------------------------------------------------------------
 trainer:
-  epochs: 100
+  epochs: 60
   precision: auto                 # bf16 on Ampere+/L4, fp16 on T4/P100, fp32 on CPU
   grad_accum_steps: 4             # effective batch 32
   grad_clip_norm: 1.0
