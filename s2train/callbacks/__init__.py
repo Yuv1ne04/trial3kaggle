@@ -269,8 +269,10 @@ class BaselineVisualizerCallback(Callback):
         for i in range(n):
             gt_rgb = self._rgb(batch["ground_truth"][i])
             pr_rgb = self._rgb(pred[i])
-            mask = batch["mask"][i, 0].cpu().numpy()
-            abs_err = np.abs(pred[i] - batch["ground_truth"][i]).mean(0).cpu().numpy()
+            mask = batch["mask"][i, 0].detach().cpu().numpy()
+            # Reduce on-GPU with torch, then move to host (np.abs on a CUDA
+            # tensor would try to convert before the .cpu() and fail).
+            abs_err = (pred[i] - batch["ground_truth"][i]).abs().mean(0).detach().cpu().numpy()
             cloud_err = abs_err * mask
             panels = [self._rgb(batch["cloudy"][i]), gt_rgb, pr_rgb, mask,
                       np.clip((pr_rgb - gt_rgb) * 2 + 0.5, 0, 1), abs_err, cloud_err]

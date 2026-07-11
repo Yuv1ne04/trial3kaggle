@@ -309,6 +309,17 @@ class Trainer:
             limit = self.config.trainer.limit_batches
             if limit and (step + 1) >= limit:  # fast-dev: cap batches per epoch
                 break
+
+        # Flush gradients from a final partial accumulation window so the
+        # optimizer steps at least once (and before the scheduler steps).
+        if count % accum != 0:
+            if clip > 0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), clip)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad(set_to_none=True)
+
         return {f"train/{k}": v / max(1, count) for k, v in totals.items()} | \
                {"train/loss": totals.get("total", 0.0) / max(1, count)}
 
