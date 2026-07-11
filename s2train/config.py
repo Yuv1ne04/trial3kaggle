@@ -110,8 +110,10 @@ class TrainerConfig:
             a fast-dev switch to exercise the whole pipeline in seconds before
             committing GPU hours.
         data_parallel: Use ``nn.DataParallel`` across all visible GPUs when more
-            than one is present (e.g. Kaggle's T4 x2). Set ``False`` to force a
-            single GPU.
+            than one is present. Off by default: for mid-sized models on
+            PCIe-linked GPUs (e.g. Kaggle's T4 x2) the per-forward replication
+            overhead often exceeds the benefit and can be *slower* than one GPU.
+            Enable only if measurement shows it helps.
     """
 
     epochs: int = 100
@@ -124,7 +126,7 @@ class TrainerConfig:
     ema_decay: float = 0.0
     deterministic: bool = False
     limit_batches: int = 0
-    data_parallel: bool = True
+    data_parallel: bool = False
 
 
 @dataclass(slots=True)
