@@ -1,0 +1,50 @@
+# Experiment 002 — Reference-conditioned UNet (uses the 2-4 references).
+# Identical framework, different model + loss weights — selected via YAML only.
+name: ref_unet
+seed: 1234
+output_root: experiments
+tags: [reference, unet]
+
+model:
+  name: ref_unet
+  params: {base: 48, depth: 4, composite: true}
+
+data:
+  name: synthetic
+  root: F:/synthetic_dataset
+  batch_size: 6
+  num_workers: 4
+  patch_size: 256
+  max_references: 4
+  reflectance_scale: 10000.0
+  augment: true
+
+optimizer:
+  name: adamw
+  params: {lr: 2.0e-4, weight_decay: 1.0e-4}
+
+scheduler:
+  name: cosine
+  params: {warmup_epochs: 5, min_lr_ratio: 0.01}
+
+loss:
+  name: composite
+  params: {charbonnier_weight: 1.0, ssim_weight: 0.5, sam_weight: 0.4,
+           gradient_weight: 0.2, cloud_weight: 8.0}
+
+metrics: [psnr, ssim, sam, rmse, mae, ergas]
+
+trainer:
+  epochs: 120
+  precision: bf16
+  grad_accum_steps: 6
+  grad_clip_norm: 1.0
+  device: auto
+
+checkpoint: {monitor: val/psnr_cloud, mode: max}
+early_stopping: {enabled: true, monitor: val/psnr_cloud, mode: max, patience: 20}
+visualization: {enabled: true, every_n_epochs: 5, num_samples: 4}
+callbacks:
+  - name: tensorboard
+
+resume: null

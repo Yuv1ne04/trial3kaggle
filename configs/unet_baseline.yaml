@@ -1,0 +1,88 @@
+# ==========================================================
+# Baseline reference-conditioned U-Net — the scientific baseline before TCR-Net.
+# Runs directly on Kaggle (T4 / P100 / L4); fails gracefully on CPU.
+# ==========================================================
+name: unet_baseline
+seed: 1234
+output_root: experiments          # -> /kaggle/working/experiments on Kaggle
+resume: auto                      # survive Kaggle session interruptions
+resume_search_dirs: []            # /kaggle/input auto-added on Kaggle
+
+# ---- Model ----------------------------------------------------------------
+model:
+  name: reference_unet            # shared-encoder + bottleneck reference fusion
+  params:
+    base: 48
+    depth: 4
+    composite: true               # preserve clear pixels via the cloud mask
+    weighted_reference: true      # validity-weighted averaging of references
+    use_mask_bottleneck: true     # fuse a downsampled mask at the bottleneck
+
+# ---- Data -----------------------------------------------------------------
+data:
+  name: synthetic
+  root: /kaggle/input/msiri-s2-synthetic/synthetic_dataset   # <-- your mounted dataset
+  batch_size: 8
+  num_workers: 2
+  patch_size: 256
+  max_references: 4
+  reflectance_scale: 10000.0
+  augment: true
+  difficulty: null                # or easy -> medium -> hard for curriculum
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: true
+  max_samples: 0                  # 0 = use all; sanity mode sets this itself
+
+# ---- Optimisation ---------------------------------------------------------
+optimizer:
+  name: adamw
+  params: {lr: 2.0e-4, weight_decay: 1.0e-4, betas: [0.9, 0.999]}
+
+scheduler:
+  name: cosine
+  params: {warmup_epochs: 5, min_lr_ratio: 0.01}
+
+# ---- Loss (all weights configurable) --------------------------------------
+loss:
+  name: composite
+  params:
+    charbonnier_weight: 1.0       # cloud-weighted robust reconstruction
+    ms_ssim_weight: 0.5           # MS-SSIM structural term
+    ssim_weight: 0.0              # (single-scale SSIM; off in favour of MS-SSIM)
+    sam_weight: 0.3               # spectral angle (spectral fidelity)
+    gradient_weight: 0.2          # edge/structure
+    cloud_weight: 8.0             # emphasise the reconstructed (cloudy) region
+
+# ---- Metrics --------------------------------------------------------------
+metrics: [psnr, ssim, sam, rmse, mae, ergas]   # cloud/clear variants auto-added
+
+# ---- Trainer --------------------------------------------------------------
+trainer:
+  epochs: 100
+  precision: auto                 # bf16 on Ampere+/L4, fp16 on T4/P100, fp32 on CPU
+  grad_accum_steps: 4             # effective batch 32
+  grad_clip_norm: 1.0
+  device: auto                    # auto-detect GPU; CPU fallback
+  val_interval: 1
+  log_interval: 100
+  ema_decay: 0.0
+
+# ---- Checkpointing / stopping / visualisation -----------------------------
+checkpoint: {monitor: val/psnr_cloud, mode: max, save_best: true, save_latest: true,
+             every_n_epochs: 10}
+early_stopping: {enabled: true, monitor: val/psnr_cloud, mode: max, patience: 15}
+visualization: {enabled: false}   # the 7-panel baseline_visualizer is used instead
+
+callbacks:
+  - name: baseline_visualizer
+    params: {every_n_epochs: 1, num_samples: 4, rgb_bands: [4, 3, 2]}
+  - name: tensorboard
+
+# ---- Sanity / overfit mode (also: `--sanity` on the CLI) ------------------
+sanity:
+  enabled: false                  # set true (or pass --sanity) to overfit a subset
+  num_samples: 64
+  epochs: 2
+  require_loss_drop: 0.1

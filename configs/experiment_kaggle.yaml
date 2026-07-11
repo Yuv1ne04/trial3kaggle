@@ -1,0 +1,57 @@
+# Kaggle-ready experiment — reference-conditioned UNet.
+#
+# Kaggle notes:
+#   * data.root points at a read-only mounted dataset under /kaggle/input.
+#   * output_root "experiments" is auto-redirected to /kaggle/working/experiments
+#     (the persisted, writable dir) so checkpoints survive the session.
+#   * resume: auto finds this run's checkpoints/latest.pt in /kaggle/working; if
+#     the session was interrupted and its output re-attached under /kaggle/input,
+#     it is found there too (/kaggle/input is auto-added to resume_search_dirs).
+#   * precision: auto picks fp16 on Kaggle's T4/P100 (bf16 only on Ampere+).
+name: ref_unet_kaggle
+seed: 1234
+output_root: experiments          # -> /kaggle/working/experiments on Kaggle
+resume: auto                      # survive session interruptions
+resume_search_dirs: []            # /kaggle/input added automatically on Kaggle
+
+model:
+  name: ref_unet
+  params: {base: 48, depth: 4, composite: true}
+
+data:
+  name: synthetic
+  root: /kaggle/input/msiri-s2-synthetic/synthetic_dataset   # <-- your mounted dataset
+  batch_size: 8
+  num_workers: 2                  # Kaggle GPU kernels have ~2-4 vCPUs
+  patch_size: 256
+  max_references: 4
+  reflectance_scale: 10000.0
+  augment: true
+  difficulty: null
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: true
+
+optimizer: {name: adamw, params: {lr: 2.0e-4, weight_decay: 1.0e-4}}
+scheduler: {name: cosine, params: {warmup_epochs: 5, min_lr_ratio: 0.01}}
+loss:
+  name: composite
+  params: {charbonnier_weight: 1.0, ssim_weight: 0.5, sam_weight: 0.4,
+           gradient_weight: 0.2, cloud_weight: 8.0}
+metrics: [psnr, ssim, sam, rmse, mae, ergas]
+
+trainer:
+  epochs: 120
+  precision: auto
+  grad_accum_steps: 8             # effective batch 64 while keeping memory low
+  grad_clip_norm: 1.0
+  device: auto
+  val_interval: 1
+  log_interval: 100
+
+checkpoint: {monitor: val/psnr_cloud, mode: max, save_best: true, save_latest: true}
+early_stopping: {enabled: true, monitor: val/psnr_cloud, mode: max, patience: 20}
+visualization: {enabled: true, every_n_epochs: 5, num_samples: 4}
+callbacks:
+  - name: tensorboard

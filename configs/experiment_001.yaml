@@ -1,0 +1,57 @@
+# Experiment 001 — UNet baseline (single-image, residual + composite).
+name: unet_baseline
+seed: 1234
+output_root: experiments
+tags: [baseline, unet]
+
+model:
+  name: unet
+  params: {base: 48, depth: 4, use_mask: true, composite: true}
+
+data:
+  name: synthetic
+  root: F:/synthetic_dataset      # local path; on Kaggle use /kaggle/input/<dataset>
+  batch_size: 8
+  num_workers: 4                  # clamped to available CPUs at runtime
+  patch_size: 256
+  max_references: 4
+  reflectance_scale: 10000.0
+  augment: true
+  difficulty: null                # or easy/medium/hard for curriculum stages
+  pin_memory: true                # auto-disabled when no CUDA
+  persistent_workers: true        # avoid re-spawning workers each epoch
+  prefetch_factor: 2
+  drop_last: true
+
+optimizer:
+  name: adamw
+  params: {lr: 2.0e-4, weight_decay: 1.0e-4}
+
+scheduler:
+  name: cosine
+  params: {warmup_epochs: 5, min_lr_ratio: 0.01}
+
+loss:
+  name: composite
+  params: {charbonnier_weight: 1.0, ssim_weight: 0.5, sam_weight: 0.3,
+           gradient_weight: 0.2, cloud_weight: 5.0}
+
+metrics: [psnr, ssim, sam, rmse, mae, ergas]
+
+trainer:
+  epochs: 100
+  precision: auto                 # auto -> bf16 on Ampere+, fp16 on T4/P100, fp32 on CPU
+  grad_accum_steps: 4
+  grad_clip_norm: 1.0
+  device: auto
+  val_interval: 1
+  log_interval: 50
+
+checkpoint: {monitor: val/psnr_cloud, mode: max, save_best: true, save_latest: true}
+early_stopping: {enabled: true, monitor: val/psnr_cloud, mode: max, patience: 15}
+visualization: {enabled: true, every_n_epochs: 5, num_samples: 4}
+
+callbacks:
+  - name: tensorboard
+
+resume: null                       # 'auto' to resume from latest.pt
