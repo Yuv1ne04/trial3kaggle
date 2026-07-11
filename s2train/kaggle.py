@@ -15,6 +15,18 @@ from pathlib import Path
 KAGGLE_INPUT = Path("/kaggle/input")
 KAGGLE_WORKING = Path("/kaggle/working")
 
+#: Directory names never descended into when searching for checkpoints — these
+#: are the huge dataset internals and would make a recursive walk enumerate
+#: ~1M tiny files (and hang) if traversed.
+_PRUNE_DIRS = frozenset({
+    "patch_library", "cloud_tile_library", "mask_library", "target_library",
+    "reference_library", "samples", "train", "validation", "test",
+    ".git", "__pycache__",
+})
+
+#: Maximum directory depth (relative to a search root) scanned for checkpoints.
+_MAX_SEARCH_DEPTH = 6
+
 
 def on_kaggle() -> bool:
     """Return whether the code is running inside a Kaggle kernel.
@@ -86,13 +98,24 @@ def find_resume_checkpoint(run_dir: Path, experiment_name: str,
     if local.exists():
         return local
 
+    # Walk directories only, pruning the huge dataset folders and capping depth,
+    # so mounting a large read-only dataset under a search dir cannot make this
+    # hang. Checkpoints live in a ``checkpoints/`` folder.
     candidates: list[Path] = []
     for base in search_dirs:
         root = Path(base)
         if not root.exists():
             continue
-        for pattern in ("**/checkpoints/latest.pt", "**/latest.pt", "**/best.pt"):
-            candidates.extend(root.glob(pattern))
+        base_depth = len(root.parts)
+        for current, dirs, files in os.walk(root):
+            if len(Path(current).parts) - base_depth >= _MAX_SEARCH_DEPTH:
+                dirs[:] = []
+                continue
+            dirs[:] = [d for d in dirs if d not in _PRUNE_DIRS]
+            if Path(current).name == "checkpoints":
+                for name in ("latest.pt", "best.pt"):
+                    if name in files:
+                        candidates.append(Path(current) / name)
 
     if not candidates:
         return None
