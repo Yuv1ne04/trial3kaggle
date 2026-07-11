@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Local data / outputs (never push these to GitHub — too large / not needed on Kaggle)
+processed/
+metadata/
+reports/
+logs/
+experiments/
+dataset/
+dataset_shared/
+synthetic_dataset/
+*.tar
+*.zip
+kaggle_codes/
+
+# Editor / tooling
+.claude/
+.vscode/
+.idea/

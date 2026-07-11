@@ -28,9 +28,10 @@ def on_kaggle() -> bool:
 def default_output_root(configured: str) -> str:
     """Return the output root, redirecting the default onto ``/kaggle/working``.
 
-    A non-default ``configured`` value is always respected; only the framework
-    default (``"experiments"``) is redirected on Kaggle so checkpoints land in
-    the persisted working directory.
+    The framework default (``"experiments"``) is redirected to
+    ``/kaggle/working``. As a safety net, any output root that points at the
+    **read-only** ``/kaggle/input`` mount (e.g. from a mis-edited config) is also
+    redirected there, so a run can never fail trying to write to the dataset.
 
     Args:
         configured: The ``output_root`` from the config.
@@ -38,8 +39,13 @@ def default_output_root(configured: str) -> str:
     Returns:
         The effective output root.
     """
-    if on_kaggle() and configured == "experiments":
-        return str(KAGGLE_WORKING / "experiments")
+    if on_kaggle():
+        try:
+            under_input = Path(configured).resolve().is_relative_to(KAGGLE_INPUT)
+        except (ValueError, OSError):
+            under_input = str(configured).startswith(str(KAGGLE_INPUT))
+        if configured == "experiments" or under_input:
+            return str(KAGGLE_WORKING / "experiments")
     return configured
 
 
