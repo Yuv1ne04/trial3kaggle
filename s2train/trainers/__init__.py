@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from torch import nn
 
 from .. import kaggle
 from ..builder import (
@@ -31,6 +32,38 @@ from ..config import ExperimentConfig
 from ..logging_setup import configure_logging, get_logger
 from ..metrics import compute_metrics
 from ..reproducibility import count_parameters, provenance, set_seed
+
+
+class _AutocastModule(nn.Module):
+    """Wraps a model so autocast runs *inside* ``forward``.
+
+    ``torch.autocast`` is thread-local, and :class:`torch.nn.DataParallel` runs
+    each replica in its own thread — so an autocast context in the main training
+    loop would not apply inside the replicas. Placing autocast in this wrapper's
+    forward makes mixed precision work correctly with (and without) DataParallel.
+    """
+
+    def __init__(self, model: nn.Module, device_type: str, dtype: torch.dtype,
+                 enabled: bool) -> None:
+        """Initialise the wrapper.
+
+        Args:
+            model: The wrapped model.
+            device_type: Autocast device type (``"cuda"`` / ``"cpu"``).
+            dtype: Autocast dtype.
+            enabled: Whether autocast is active.
+        """
+        super().__init__()
+        self.model = model
+        self._device_type = device_type
+        self._dtype = dtype
+        self._enabled = enabled
+
+    def forward(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Run the wrapped model under autocast."""
+        with torch.autocast(device_type=self._device_type, dtype=self._dtype,
+                            enabled=self._enabled):
+            return self.model(batch)
 
 
 class Trainer:
@@ -58,9 +91,12 @@ class Trainer:
         self.device = resolve_device(config.trainer.device)
         if self.device.type == "cuda" and not config.trainer.deterministic:
             torch.backends.cudnn.benchmark = True  # fixed patch size -> faster
-        self.model = build_model(config).to(self.device)
+        # ``core_model`` is the raw network (owns the parameters, is what gets
+        # checkpointed); ``model`` is the training-time module (autocast wrapper,
+        # optionally DataParallel across GPUs) built in _setup_amp().
+        self.core_model = build_model(config).to(self.device)
         self.loss_fn = build_loss(config)
-        self.optimizer = build_optimizer(config, self.model)
+        self.optimizer = build_optimizer(config, self.core_model)
         self.scheduler = build_scheduler(config, self.optimizer)
         self.callbacks = build_callbacks(config)
 
@@ -93,13 +129,32 @@ class Trainer:
         if self.device.type != "cuda":
             precision = "fp32"
         elif precision in ("auto", "amp"):
-            precision = "bf16" if torch.cuda.is_bf16_supported() else "fp16"
+            # Native bf16 tensor cores require Ampere (compute capability >= 8).
+            # On Turing (T4) and Pascal (P100) bf16 is emulated and SLOWER than
+            # fp16, which uses their real fp16 tensor cores — so pick fp16 there.
+            major = torch.cuda.get_device_capability(self.device)[0]
+            precision = "bf16" if major >= 8 else "fp16"
         self.precision = precision
         self.amp_enabled = precision in ("bf16", "fp16")
         self.amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
         use_scaler = precision == "fp16" and self.device.type == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
+        self.model = self._build_train_module()
         self.logger.info("Precision resolved to '%s' on %s", precision, self.device)
+
+    def _build_train_module(self) -> nn.Module:
+        """Wrap the core model for training (autocast + optional DataParallel).
+
+        Returns:
+            The training-time module used for forward/backward.
+        """
+        module = _AutocastModule(self.core_model, self.device.type,
+                                 self.amp_dtype, self.amp_enabled)
+        n_gpu = torch.cuda.device_count() if self.device.type == "cuda" else 0
+        if n_gpu > 1 and self.config.trainer.data_parallel:
+            self.logger.info("DataParallel enabled across %d GPUs", n_gpu)
+            return nn.DataParallel(module)
+        return module
 
     # ----- public API used by callbacks ---------------------------------------
 
@@ -118,13 +173,18 @@ class Trainer:
     def forward(self, batch: dict[str, Any]) -> torch.Tensor:
         """Run the model on a (device-resident) batch.
 
+        Only tensor entries are passed to the model so that DataParallel scatters
+        cleanly (the non-tensor ``metadata`` list is dropped). The autocast
+        wrapper handles mixed precision internally.
+
         Args:
             batch: A batch already on the device.
 
         Returns:
             The prediction ``(B, 13, H, W)``.
         """
-        return self.model(batch)
+        tensors = {k: v for k, v in batch.items() if torch.is_tensor(v)}
+        return self.model(tensors)
 
     def request_stop(self) -> None:
         """Signal the loop to stop after the current epoch."""
@@ -176,7 +236,7 @@ class Trainer:
         tmp = path.with_suffix(".pt.tmp")
         torch.save({
             "epoch": epoch,
-            "model": self.model.state_dict(),
+            "model": self.core_model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "scaler": self.scaler.state_dict(),
@@ -208,7 +268,7 @@ class Trainer:
             self.logger.info("Resume requested but no checkpoint found (starting fresh)")
             return
         state = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(state["model"])
+        self.core_model.load_state_dict(state["model"])
         self.optimizer.load_state_dict(state["optimizer"])
         self.scheduler.load_state_dict(state["scheduler"])
         self.scaler.load_state_dict(state["scaler"])
@@ -224,7 +284,7 @@ class Trainer:
         Returns:
             The experiment summary dict (also written to disk).
         """
-        params = count_parameters(self.model)
+        params = count_parameters(self.core_model)
         self.logger.info("Model '%s' | %s params | device=%s | precision=%s",
                          self.config.model.name, f"{params['total']:,}",
                          self.device, self.precision)
@@ -283,10 +343,8 @@ class Trainer:
 
         for step, batch in enumerate(self.train_loader):
             batch = self.to_device(batch)
-            with torch.autocast(device_type=self.device.type, dtype=self.amp_dtype,
-                                enabled=self.amp_enabled):
-                pred = self.model(batch)
-                loss, components = self.loss_fn(pred, batch["ground_truth"], batch["mask"])
+            pred = self.forward(batch)  # autocast happens inside the model wrapper
+            loss, components = self.loss_fn(pred, batch["ground_truth"], batch["mask"])
             self.scaler.scale(loss / accum).backward()
 
             if (step + 1) % accum == 0:
@@ -339,7 +397,7 @@ class Trainer:
         limit = self.config.trainer.limit_batches
         for batch in self.val_loader:
             batch = self.to_device(batch)
-            pred = self.model(batch)
+            pred = self.forward(batch)
             loss, _ = self.loss_fn(pred, batch["ground_truth"], batch["mask"])
             loss_total += float(loss)
             metrics = compute_metrics(pred, batch["ground_truth"], batch["mask"],

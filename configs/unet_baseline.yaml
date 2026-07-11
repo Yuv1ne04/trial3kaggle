@@ -22,7 +22,9 @@ model:
 data:
   name: synthetic
   root: /kaggle/input/msiri-s2-synthetic/synthetic_dataset   # <-- your mounted dataset
-  batch_size: 8
+  # Batch is split across GPUs by DataParallel: 16 -> 8 per card on T4 x2
+  # (~8 GB each, fits 15 GB). On a single GPU lower this to 8 to avoid OOM.
+  batch_size: 16
   num_workers: 2
   patch_size: 256
   max_references: 4

@@ -109,6 +109,9 @@ class TrainerConfig:
         limit_batches: If > 0, cap the number of train/val batches per epoch —
             a fast-dev switch to exercise the whole pipeline in seconds before
             committing GPU hours.
+        data_parallel: Use ``nn.DataParallel`` across all visible GPUs when more
+            than one is present (e.g. Kaggle's T4 x2). Set ``False`` to force a
+            single GPU.
     """
 
     epochs: int = 100
@@ -121,6 +124,7 @@ class TrainerConfig:
     ema_decay: float = 0.0
     deterministic: bool = False
     limit_batches: int = 0
+    data_parallel: bool = True
 
 
 @dataclass(slots=True)
