@@ -123,10 +123,15 @@ def build_dataloader(config: ExperimentConfig, split: str, *, shuffle: bool,
         reflectance_scale=data.reflectance_scale, augment=augment,
         difficulty=data.difficulty, seed=config.seed, **data.params)
 
-    # Overfit / sanity mode: restrict to the first ``max_samples`` samples.
-    if data.max_samples and len(dataset) > data.max_samples:
+    # Cap the split to a fixed, seeded RANDOM subset (spans all dates, unlike a
+    # first-N slice). Validation uses its own smaller cap when set.
+    is_val = split == data.val_split
+    cap = data.val_max_samples if (is_val and data.val_max_samples > 0) else data.max_samples
+    if cap and len(dataset) > cap:
         from torch.utils.data import Subset
-        dataset = Subset(dataset, list(range(data.max_samples)))
+        generator = torch.Generator().manual_seed(config.seed)
+        indices = torch.randperm(len(dataset), generator=generator)[:cap].tolist()
+        dataset = Subset(dataset, indices)
 
     workers = max(0, min(data.num_workers, os.cpu_count() or 1))
     kwargs: dict = {

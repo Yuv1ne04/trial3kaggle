@@ -40,6 +40,7 @@ data:
   # (30000 / ~11 samples/s ~= 45 min/epoch). Raise/lower to trade time vs data;
   # set 0 to use everything. Augmentation + curriculum still give variety.
   max_samples: 30000
+  val_max_samples: 3000            # validate on 3k (a stable metric) not 30k -> saves ~25 min/epoch
 
 # ---- Optimisation ---------------------------------------------------------
 optimizer:

@@ -69,6 +69,13 @@ class DataConfig:
             Kaggle when ``num_workers > 0``; only applied when it is).
         prefetch_factor: Batches prefetched per worker (only when workers > 0).
         drop_last: Drop the last incomplete training batch.
+        max_samples: Cap the (train/test) split to this many samples per epoch
+            (0 = all). The subset is a fixed, seeded *random* sample so it spans
+            all dates rather than the earliest ones.
+        val_max_samples: Separate, usually much smaller cap for the validation
+            split (0 = fall back to ``max_samples``). Validating on a few
+            thousand samples keeps the monitored metric stable while cutting
+            minutes off every epoch.
         params: Extra dataset-specific keyword arguments.
     """
 
@@ -89,6 +96,7 @@ class DataConfig:
     prefetch_factor: int = 2
     drop_last: bool = True
     max_samples: int = 0
+    val_max_samples: int = 0
     params: dict[str, Any] = field(default_factory=dict)
 
 
