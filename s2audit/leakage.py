@@ -112,7 +112,7 @@ def audit_leakage(root: Path | str, *, max_samples: int = 0) -> dict[str, Any]:
         "overall_status": overall,
         "splits_scanned": {s: counts[s] for s in splits},
         "max_samples_per_split": max_samples or "all",
-        "note_validation_present": "validation" in splits,
+        "note_validation_present": any(s in ("validation", "val") for s in splits),
         "checks": checks,
         "failed_checks": fails,
         "warning_checks": warns,

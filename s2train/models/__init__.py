@@ -10,6 +10,7 @@ No other framework code changes.
 from __future__ import annotations
 
 from .base import BaseReconstructionModel
+from .reference_residual_unet_v2 import ReferenceResidualUNetV2
 from .reference_unet import ReferenceUNetBaseline
 from .unet import ReferenceUNet, UNet
 

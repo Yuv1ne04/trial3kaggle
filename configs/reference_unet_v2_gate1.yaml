@@ -1,0 +1,81 @@
+# ==========================================================
+# Gate 1 - tiny overfit of the physically-bounded ReferenceResidualUNetV2.
+# Purpose: prove the bounded formulation fits and beats the weighted-reference
+# mean on a small high-quality subset before any scaled training.
+# Runs on Kaggle (GPU) or locally (CPU, smaller). Never touches best.pt.
+# ==========================================================
+name: reference_unet_v2_gate1
+seed: 1234
+output_root: experiments            # -> /kaggle/working/experiments on Kaggle
+resume: auto
+resume_search_dirs: []
+
+model:
+  name: reference_unet_v2           # bounded sigmoid(logit(B)+scale*tanh(delta))
+  params:
+    base: 48
+    depth: 4
+    composite: true                 # clear observed pixels preserved exactly
+    weighted_reference: true
+    use_mask_bottleneck: true
+    residual_scale: 3.0             # max logit-space correction (tanh-bounded)
+    eps: 1.0e-3                     # prior clamp/logit floor
+
+data:
+  name: synthetic
+  root: /kaggle/input/msiri-s2-synthetic/synthetic_dataset   # <-- your mounted dataset
+  batch_size: 8
+  num_workers: 2
+  patch_size: 256
+  max_references: 4
+  reflectance_scale: 10000.0
+  augment: false                    # overfit: no augmentation
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: false
+  # Gate 1 selects ~96 high-quality land-dominant samples via s2repair (not here).
+
+optimizer:
+  name: adamw
+  params: {lr: 3.0e-4, weight_decay: 0.0, betas: [0.9, 0.999]}
+
+scheduler:
+  name: cosine
+  params: {warmup_epochs: 2, min_lr_ratio: 0.05}
+
+# Repaired masked, band-weighted, vegetation-index-aware loss.
+loss:
+  name: repair_composite
+  params:
+    base_loss: charbonnier
+    charbonnier_weight: 1.0
+    sam_weight: 0.15
+    gradient_weight: 0.10
+    ndvi_weight: 0.10
+    ndre_weight: 0.05
+    land_only_indices: true
+    # band_weights default: surface 1.0, atmospheric B01/B09/B10 -> 0.1
+
+metrics: [psnr, ssim, sam, rmse, mae]
+
+# Primary checkpoint metric = micro cloud-land RMSE (min). NOT macro PSNR.
+checkpoint: {monitor: val/cloud_land_rmse_micro, mode: min, save_best: true,
+             save_latest: true, every_n_epochs: 10}
+early_stopping: {enabled: false}
+visualization: {enabled: false}
+callbacks: []
+
+trainer:
+  epochs: 80
+  precision: auto                   # fp16 on T4/P100, bf16 on Ampere+, fp32 CPU
+  grad_accum_steps: 1
+  grad_clip_norm: 1.0
+  device: auto
+
+# s2repair gate parameters (consumed by `python -m s2repair gate1`).
+gate:
+  n_samples: 96
+  policy: conservative              # audited PASS + unaudited native<=threshold
+  native_threshold: 0.01
+  scan_cap: 4000

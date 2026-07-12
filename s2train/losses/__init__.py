@@ -262,3 +262,152 @@ class CharbonnierLoss(nn.Module):
         """
         total = charbonnier(pred, target, mask, cloud_weight=self.cloud_weight)
         return total, {"total": float(total.detach())}
+
+
+# --------------------------------------------------------------------------- #
+# Repaired loss (v2): masked, band-weighted, vegetation-index aware.          #
+# --------------------------------------------------------------------------- #
+#: Default per-band weights: operational surface bands 1.0, atmospheric
+#: (B01 aerosol, B09 water-vapour, B10 cirrus) down-weighted so they cannot
+#: dominate the optimisation. Order: B01 B02 B03 B04 B05 B06 B07 B08 B8A B09 B10 B11 B12.
+DEFAULT_BAND_WEIGHTS = [0.1, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.1, 0.1, 1.0, 1.0]
+
+# Vegetation-index band indices (0-based) in the fixed band order.
+_GREEN, _RED, _RE1, _NIR = 2, 3, 4, 7
+
+
+def _masked_mean(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Weighted mean of ``x`` over a (broadcast) non-negative weight."""
+    num = (x * weight).sum()
+    den = weight.expand_as(x).sum().clamp_min(1.0)
+    return num / den
+
+
+def _land_from_target(target: torch.Tensor, *, floor: float = 2e-3,
+                      background: float = 1.5e-3) -> torch.Tensor:
+    """Boolean land mask (valid, non-water) from the clean target reflectance."""
+    green, nir = target[:, _GREEN:_GREEN + 1], target[:, _NIR:_NIR + 1]
+    denom = green + nir
+    ndwi = torch.where(denom >= floor, (green - nir) / denom.clamp_min(floor),
+                       torch.zeros_like(denom))
+    bg = (target < background).all(dim=1, keepdim=True)
+    water = (ndwi > 0.0) & (~bg)
+    return (~bg) & (~water)
+
+
+def _index_pair(x: torch.Tensor, a: int, b: int, floor: float):
+    """Return (index_value, valid) for a normalized difference of bands a,b."""
+    num = x[:, a:a + 1] - x[:, b:b + 1]
+    den = x[:, a:a + 1] + x[:, b:b + 1]           # >= 0 for reflectance
+    valid = den >= floor
+    value = torch.where(valid, num / den.clamp_min(floor), torch.zeros_like(den))
+    return value, valid
+
+
+@LOSSES.register("repair_composite")
+class RepairLoss(nn.Module):
+    """Masked, band-weighted, vegetation-index-aware reconstruction loss (v2).
+
+    All terms are evaluated only over reconstructed (cloud) pixels; the
+    vegetation-index terms are further restricted to valid land pixels with
+    epsilon-safeguarded denominators. Per-band weights keep the atmospheric
+    bands (B01/B09/B10) from dominating. Every weight is configurable from YAML.
+    """
+
+    def __init__(self, base_loss: str = "charbonnier", charbonnier_weight: float = 1.0,
+                 sam_weight: float = 0.15, gradient_weight: float = 0.10,
+                 ndvi_weight: float = 0.10, ndre_weight: float = 0.05,
+                 band_weights: list | None = None, land_only_indices: bool = True,
+                 eps: float = 1e-3, index_denom_floor: float = 2e-3,
+                 huber_beta: float = 0.1) -> None:
+        """Initialise the repaired loss.
+
+        Args:
+            base_loss: ``"charbonnier"`` or ``"huber"`` for the primary term.
+            charbonnier_weight: Weight of the primary reconstruction term.
+            sam_weight: Weight of the masked spectral-angle term.
+            gradient_weight: Weight of the masked edge/gradient term.
+            ndvi_weight: Weight of the masked NDVI term.
+            ndre_weight: Weight of the masked NDRE term.
+            band_weights: Optional length-13 per-band weights (defaults to
+                :data:`DEFAULT_BAND_WEIGHTS`).
+            land_only_indices: Restrict NDVI/NDRE terms to land pixels.
+            eps: Charbonnier/SAM epsilon.
+            index_denom_floor: Minimum |denominator| for a valid index pixel.
+            huber_beta: Huber transition point (when ``base_loss='huber'``).
+        """
+        super().__init__()
+        self.base_loss = base_loss
+        self.weights = {"recon": charbonnier_weight, "sam": sam_weight,
+                        "gradient": gradient_weight, "ndvi": ndvi_weight,
+                        "ndre": ndre_weight}
+        self.land_only_indices = land_only_indices
+        self.eps = eps
+        self.index_denom_floor = index_denom_floor
+        self.huber_beta = huber_beta
+        bw = band_weights if band_weights is not None else DEFAULT_BAND_WEIGHTS
+        self.register_buffer("band_weights", torch.tensor(bw, dtype=torch.float32).view(1, -1, 1, 1))
+
+    def _recon(self, pred, target, region_bw):
+        if self.base_loss == "huber":
+            per = F.smooth_l1_loss(pred, target, reduction="none", beta=self.huber_beta)
+        else:
+            per = torch.sqrt((pred - target) ** 2 + self.eps ** 2)
+        return _masked_mean(per, region_bw)
+
+    def _sam(self, pred, target, cloud):
+        dot = (pred * target).sum(dim=1, keepdim=True)
+        pn = pred.norm(dim=1, keepdim=True)
+        tn = target.norm(dim=1, keepdim=True)
+        denom = pn * tn
+        valid = cloud & (denom > self.eps)
+        cos = (dot / denom.clamp_min(self.eps)).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+        return _masked_mean(torch.arccos(cos), valid.float())
+
+    def _gradient(self, pred, target, cloud):
+        dxp = pred[:, :, :, 1:] - pred[:, :, :, :-1]
+        dxt = target[:, :, :, 1:] - target[:, :, :, :-1]
+        dyp = pred[:, :, 1:, :] - pred[:, :, :-1, :]
+        dyt = target[:, :, 1:, :] - target[:, :, :-1, :]
+        lx = _masked_mean((dxp - dxt).abs().mean(dim=1, keepdim=True), cloud[:, :, :, 1:].float())
+        ly = _masked_mean((dyp - dyt).abs().mean(dim=1, keepdim=True), cloud[:, :, 1:, :].float())
+        return lx + ly
+
+    def _index(self, pred, target, region, a, b):
+        ip, vp = _index_pair(pred, a, b, self.index_denom_floor)
+        it, vt = _index_pair(target, a, b, self.index_denom_floor)
+        valid = (region & vp & vt).float()
+        return _masked_mean((ip - it).abs(), valid)
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor,
+                mask: torch.Tensor) -> LossOutput:
+        """Compute the total repaired loss and its components.
+
+        Args:
+            pred: Prediction ``(B, 13, H, W)`` (expected already in [0, 1]).
+            target: Ground truth ``(B, 13, H, W)``.
+            mask: Cloud mask ``(B, 1, H, W)`` (1 = reconstructed pixel).
+
+        Returns:
+            ``(total, components)``.
+        """
+        cloud = mask > 0.5
+        region_bw = mask * self.band_weights                      # (B,13,H,W)
+        index_region = cloud
+        if self.land_only_indices:
+            index_region = cloud & _land_from_target(target, floor=self.index_denom_floor)
+
+        terms = {"recon": self._recon(pred, target, region_bw)}
+        if self.weights["sam"] > 0:
+            terms["sam"] = self._sam(pred, target, cloud)
+        if self.weights["gradient"] > 0:
+            terms["gradient"] = self._gradient(pred, target, cloud)
+        if self.weights["ndvi"] > 0:
+            terms["ndvi"] = self._index(pred, target, index_region, _NIR, _RED)
+        if self.weights["ndre"] > 0:
+            terms["ndre"] = self._index(pred, target, index_region, _NIR, _RE1)
+
+        total = sum(self.weights[k] * v for k, v in terms.items())
+        components = {k: float(v.detach()) for k, v in terms.items()}
+        components["total"] = float(total.detach())
+        return total, components

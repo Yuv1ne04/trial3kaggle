@@ -66,20 +66,43 @@ def _record(split: str, path: Path, spec: dict) -> SampleRecord:
     )
 
 
+def resolve_split_dir(root: Path | str, split: str) -> Path | None:
+    """Resolve a split name to its samples directory, honouring the val alias.
+
+    ``validation`` and ``val`` are treated as aliases so a split is discovered
+    whichever spelling the dataset used.
+
+    Args:
+        root: Dataset root.
+        split: Requested split name.
+
+    Returns:
+        The existing split directory, or ``None`` if neither spelling exists.
+    """
+    base = Path(root) / "samples"
+    candidates = [split]
+    if split in ("validation", "val"):
+        candidates = ["validation", "val"]
+    for name in candidates:
+        if (base / name).is_dir():
+            return base / name
+    return None
+
+
 def scan_split(root: Path | str, split: str, *, max_samples: int = 0) -> Iterator[SampleRecord]:
     """Yield :class:`SampleRecord` for a split, optionally capped.
 
     Args:
         root: Dataset root.
-        split: ``train`` / ``validation`` / ``test``.
+        split: ``train`` / ``validation`` (or ``val``) / ``test``.
         max_samples: Cap (0 = all). Files are visited in sorted name order for
             reproducibility.
 
     Yields:
         One :class:`SampleRecord` per manifest.
     """
-    split_dir = Path(root) / "samples" / split
-    if not split_dir.is_dir():
+    split_dir = resolve_split_dir(root, split)
+    if split_dir is None:
         return
     names = sorted(e.name for e in os.scandir(split_dir) if e.name.endswith(".json"))
     if max_samples:
