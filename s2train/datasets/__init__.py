@@ -58,7 +58,8 @@ class SyntheticDataset(Dataset):
 
     def __init__(self, root: str, split: str = "train", *, max_references: int = 4,
                  reflectance_scale: float = 10000.0, augment: bool = False,
-                 difficulty: str | None = None, seed: int = 0, **_: Any) -> None:
+                 difficulty: str | None = None, seed: int = 0, gt_filter: Any = None,
+                 **_: Any) -> None:
         """Initialise the dataset.
 
         Args:
@@ -75,7 +76,7 @@ class SyntheticDataset(Dataset):
 
         self.inner = S2SyntheticDataset(
             root, split=split, maximum_references=max_references,
-            reflectance_scale=reflectance_scale, difficulty=difficulty)
+            reflectance_scale=reflectance_scale, difficulty=difficulty, gt_filter=gt_filter)
         self.augment = augment
         self.rng = random.Random(seed)
 

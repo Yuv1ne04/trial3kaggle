@@ -10,6 +10,11 @@ metadata/
 reports/
 logs/
 experiments/
+audit/
+audit_smoke/
+best.pt
+latest.pt
+*.pt
 dataset/
 dataset_shared/
 synthetic_dataset/

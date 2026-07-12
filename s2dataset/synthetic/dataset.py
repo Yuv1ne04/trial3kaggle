@@ -10,10 +10,31 @@ import-safe without PyTorch.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from .corruptor import compose_cloudy
+
+_PATCH_KEY = re.compile(r"[/\\](\d{8})[/\\]patch_(\d+)\.npz$")
+
+
+def _load_gt_exclusions(gt_filter: Any) -> set[str]:
+    """Return the set of excluded ground-truth patch ids from a filter source.
+
+    Args:
+        gt_filter: A set/list of ``"<date>_<cell>"`` ids, or a path to an
+            ``ground_truth_filter_manifest.json`` (uses ``exclude_patch_ids``).
+
+    Returns:
+        A set of excluded patch ids (empty when ``gt_filter`` is falsy).
+    """
+    if not gt_filter:
+        return set()
+    if isinstance(gt_filter, (set, list, tuple)):
+        return set(gt_filter)
+    data = json.loads(Path(gt_filter).read_text(encoding="utf-8"))
+    return set(data.get("exclude_patch_ids", data if isinstance(data, list) else []))
 
 
 class S2SyntheticDataset:
@@ -45,6 +66,7 @@ class S2SyntheticDataset:
         constant_fill_value: int = 8000,
         mask_cloud_value: int = 1,
         difficulty: str | None = None,
+        gt_filter: Any = None,
     ) -> None:
         """Initialise the dataset.
 
@@ -59,6 +81,11 @@ class S2SyntheticDataset:
             mask_cloud_value: Mask value denoting cloud.
             difficulty: If set, keep only samples of this curriculum band
                 (enables easy->hard curriculum scheduling).
+            gt_filter: Optional ground-truth exclusion source (a set of
+                ``"<date>_<cell>"`` ids or a path to
+                ``ground_truth_filter_manifest.json``). Samples whose ground
+                truth is excluded are dropped. Default ``None`` = no filtering
+                (fully backward compatible).
 
         Raises:
             ImportError: If PyTorch is not installed.
@@ -81,6 +108,9 @@ class S2SyntheticDataset:
         files = sorted(self.split_dir.glob("*.json"))
         if difficulty is not None:
             files = [f for f in files if self._difficulty(f) == difficulty]
+        exclude = _load_gt_exclusions(gt_filter)
+        if exclude:
+            files = [f for f in files if self._gt_patch_id(f) not in exclude]
         self.sample_files = files
         if not self.sample_files:
             raise FileNotFoundError(f"No manifests in {self.split_dir} (difficulty={difficulty})")
@@ -92,6 +122,16 @@ class S2SyntheticDataset:
             return json.loads(path.read_text(encoding="utf-8"))["metadata"].get("difficulty")
         except (json.JSONDecodeError, KeyError, OSError):
             return None
+
+    @staticmethod
+    def _gt_patch_id(path: Path) -> str | None:
+        """Return the ``"<date>_<cell>"`` id of a manifest's ground truth."""
+        try:
+            gt = json.loads(path.read_text(encoding="utf-8")).get("ground_truth", "")
+        except (json.JSONDecodeError, OSError):
+            return None
+        m = _PATCH_KEY.search(gt or "")
+        return f"{m.group(1)}_{int(m.group(2))}" if m else None
 
     def __len__(self) -> int:
         """Return the number of samples in the split."""
